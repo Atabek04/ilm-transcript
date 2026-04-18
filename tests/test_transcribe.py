@@ -6,7 +6,19 @@ import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from transcribe import main, resolve_source, write_clean, write_meta, write_raw
+import pytest
+
+from transcribe import (
+    fetch_subtitles,
+    main,
+    merge_segments,
+    parse_subtitles,
+    resolve_source,
+    split_audio,
+    write_clean,
+    write_meta,
+    write_raw,
+)
 
 
 def _seg(start: float, end: float, text: str) -> SimpleNamespace:
@@ -226,6 +238,7 @@ def test_main_skips_transcription_when_outputs_exist(tmp_path, caplog):
 
     with (
         patch("transcribe.transcribe_audio") as mock_ta,
+        patch("transcribe.split_audio", return_value=[out_dir / "audio.mp3"]),
         patch("transcribe.check_ffmpeg"),
         caplog.at_level(logging.INFO),
     ):
@@ -251,6 +264,7 @@ def test_main_retranscribes_when_mode_differs(tmp_path):
     fake_info = _make_fake_info()
     with (
         patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.split_audio", return_value=[out_dir / "audio.mp3"]),
         patch("transcribe.check_ffmpeg"),
     ):
         _run_main(
@@ -267,12 +281,14 @@ def test_main_subs_first_logs_and_continues(tmp_path, caplog):
     fake_info = _make_fake_info()
     with (
         patch("transcribe.transcribe_audio", return_value=([], fake_info)),
+        patch("transcribe.split_audio", return_value=[src]),
         patch("transcribe.check_ffmpeg"),
         caplog.at_level(logging.INFO),
     ):
         _run_main([str(src), "--subs-first", "--output-dir", str(tmp_path / "output")])
 
-    assert any("Phase 2" in r.message for r in caplog.records)
+    # en-ar mode → subs-first ignored with a log message
+    assert any("ignored" in r.message for r in caplog.records)
 
 
 def test_main_force_bypasses_idempotency(tmp_path):
@@ -289,6 +305,7 @@ def test_main_force_bypasses_idempotency(tmp_path):
     fake_info = _make_fake_info()
     with (
         patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.split_audio", return_value=[out_dir / "audio.mp3"]),
         patch("transcribe.check_ffmpeg"),
     ):
         _run_main(
@@ -303,3 +320,203 @@ def test_main_force_bypasses_idempotency(tmp_path):
         )
 
     mock_ta.assert_called_once()
+
+
+# --- fetch_subtitles ---
+
+
+def test_fetch_subtitles_returns_none_when_no_file(tmp_path):
+    with patch("yt_dlp.YoutubeDL") as mock_ydl:
+        mock_ydl.return_value.__enter__ = lambda s: s
+        mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+        result = fetch_subtitles("https://youtube.com/watch?v=abc", tmp_path)
+    assert result is None
+
+
+def test_fetch_subtitles_returns_path_when_file_exists(tmp_path):
+    sub_file = tmp_path / "subs.ar.vtt"
+    sub_file.write_text("WEBVTT\n", encoding="utf-8")
+
+    with patch("yt_dlp.YoutubeDL") as mock_ydl:
+        mock_ydl.return_value.__enter__ = lambda s: s
+        mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+        result = fetch_subtitles("https://youtube.com/watch?v=abc", tmp_path)
+
+    assert result == sub_file
+
+
+def test_fetch_subtitles_returns_none_on_exception(tmp_path):
+    with patch("yt_dlp.YoutubeDL", side_effect=Exception("network error")):
+        result = fetch_subtitles("https://youtube.com/watch?v=abc", tmp_path)
+    assert result is None
+
+
+# --- parse_subtitles ---
+
+
+def test_parse_subtitles_srt(tmp_path):
+    srt = (
+        "1\n00:00:01,000 --> 00:00:04,100\nIn the name of Allah\n\n"
+        "2\n00:00:04,200 --> 00:00:06,700\nالتَّوَكُّل\n\n"
+    )
+    path = tmp_path / "subs.ar.srt"
+    path.write_text(srt, encoding="utf-8")
+    segs = parse_subtitles(path)
+    assert len(segs) == 2
+    assert segs[0].start == pytest.approx(1.0)
+    assert segs[0].end == pytest.approx(4.1)
+    assert segs[0].text == "In the name of Allah"
+    assert segs[1].text == "التَّوَكُّل"
+
+
+def test_parse_subtitles_vtt_strips_html(tmp_path):
+    vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:04.100\n<c>التَّوَكُّل</c>\n\n"
+    path = tmp_path / "subs.ar.vtt"
+    path.write_text(vtt, encoding="utf-8")
+    segs = parse_subtitles(path)
+    assert len(segs) == 1
+    assert segs[0].text == "التَّوَكُّل"
+    assert "<c>" not in segs[0].text
+
+
+def test_parse_subtitles_arabic_preserved(tmp_path):
+    arabic = "وَالَّذِينَ آمَنُوا"
+    srt = f"1\n00:00:00,000 --> 00:00:02,000\n{arabic}\n\n"
+    path = tmp_path / "subs.ar.srt"
+    path.write_text(srt, encoding="utf-8")
+    segs = parse_subtitles(path)
+    assert segs[0].text == arabic
+
+
+# --- split_audio ---
+
+
+def test_split_audio_passthrough_short_file(tmp_path):
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"fake")
+    with patch("transcribe._ffprobe_duration", return_value=3600.0):
+        result = split_audio(audio, tmp_path)
+    assert result == [audio]
+
+
+def test_split_audio_creates_chunks_for_long_file(tmp_path):
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"fake")
+    fake_silence = (
+        "silence_end: 1820.5 | silence_duration: 0.8\n"
+        "silence_end: 3620.1 | silence_duration: 0.6\n"
+    )
+
+    with (
+        patch("transcribe._ffprobe_duration", return_value=10800.1),
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(stderr=fake_silence, stdout="", returncode=0)
+        result = split_audio(audio, tmp_path, chunk_minutes=30, force=True)
+
+    assert len(result) > 1
+    assert all(str(p).endswith(".wav") for p in result)
+
+
+def test_split_audio_idempotent(tmp_path):
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"fake")
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    existing = chunks_dir / "chunk_000.wav"
+    existing.write_bytes(b"chunk")
+
+    with patch("transcribe._ffprobe_duration", return_value=20000.0):
+        result = split_audio(audio, tmp_path, force=False)
+
+    assert result == [existing]
+
+
+# --- merge_segments ---
+
+
+def test_merge_segments_applies_offsets():
+    chunk0 = [_seg(0.0, 2.0, "Hello"), _seg(2.5, 4.0, "world")]
+    chunk1 = [_seg(0.0, 1.5, "Arabic")]
+    merged = merge_segments([chunk0, chunk1], [0.0, 100.0])
+    assert merged[0].start == pytest.approx(0.0)
+    assert merged[1].end == pytest.approx(4.0)
+    assert merged[2].start == pytest.approx(100.0)
+    assert merged[2].end == pytest.approx(101.5)
+    assert merged[2].text == "Arabic"
+
+
+# --- subs-first wiring in main() ---
+
+
+def test_main_subs_first_ar_uses_subtitles_skips_whisper(tmp_path):
+    out_dir = tmp_path / "output" / "some-slug"
+    out_dir.mkdir(parents=True)
+    sub_path = out_dir / "subs.ar.vtt"
+    fake_audio = out_dir / "audio.m4a"
+    fake_audio.write_bytes(b"audio")
+    fake_segs = [_seg(0.0, 2.0, "مرحبا")]
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch(
+            "transcribe.resolve_source",
+            return_value=(
+                fake_audio,
+                {"title": "T", "url": "https://yt", "source_path": None},
+            ),
+        ),
+        patch("transcribe.fetch_subtitles", return_value=sub_path),
+        patch("transcribe.parse_subtitles", return_value=fake_segs),
+        patch("transcribe.split_audio"),
+        patch("transcribe.transcribe_audio") as mock_ta,
+        patch("transcribe.write_raw"),
+        patch("transcribe.write_clean"),
+        patch("transcribe.write_meta"),
+    ):
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                "https://yt",
+                "--mode",
+                "ar",
+                "--subs-first",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
+            main()
+
+    mock_ta.assert_not_called()
+
+
+def test_main_subs_first_non_ar_logs_ignored(tmp_path, caplog):
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    fake_info = _make_fake_info()
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe.split_audio", return_value=[src]),
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)),
+        patch("transcribe.write_raw"),
+        patch("transcribe.write_clean"),
+        patch("transcribe.write_meta"),
+        caplog.at_level(logging.INFO),
+    ):
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                str(src),
+                "--mode",
+                "en-ar",
+                "--subs-first",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
+            main()
+
+    assert any("ignored" in r.message for r in caplog.records)

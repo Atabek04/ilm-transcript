@@ -5,9 +5,13 @@ import datetime
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from faster_whisper import WhisperModel
 
@@ -16,6 +20,66 @@ from utils import check_ffmpeg, configure_logging, sanitize_slug
 
 DEFAULT_MODEL = "large-v3-turbo"
 VALID_MODES = {"en-ar", "ar", "en"}
+LONG_AUDIO_THRESHOLD_S = 10800  # 3 hours
+DEFAULT_CHUNK_MINUTES = 30
+
+
+def fetch_subtitles(url: str, output_dir: Path) -> "Path | None":
+    """Fetch Arabic subtitles from YouTube. Returns path to sub file or None."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ydl_opts = {
+        "writeautomaticsub": True,
+        "writesubtitles": True,
+        "subtitleslangs": ["ar"],
+        "skip_download": True,
+        "outtmpl": str(output_dir / "subs"),
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        logging.warning(f"Subtitle fetch failed: {e}")
+        return None
+
+    matches = list(output_dir.glob("subs.ar.*"))
+    return matches[0] if matches else None
+
+
+def _ts_to_seconds(ts: str) -> float:
+    """Convert SRT/VTT timestamp string to float seconds."""
+    ts = ts.replace(",", ".")
+    parts = ts.split(":")
+    h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+    return h * 3600 + m * 60 + s
+
+
+def parse_subtitles(path: Path) -> list:
+    """Parse SRT or VTT subtitle file. Returns segments with .start, .end, .text."""
+    text = path.read_text(encoding="utf-8")
+    segments = []
+
+    # Normalise line endings, strip BOM
+    text = text.replace("\r\n", "\n").lstrip("\ufeff")
+
+    # Pattern matches both SRT (HH:MM:SS,mmm) and VTT (HH:MM:SS.mmm)
+    block_re = re.compile(
+        r"(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})[^\n]*\n([\s\S]*?)(?=\n\n|\Z)",
+        re.MULTILINE,
+    )
+    for m in block_re.finditer(text):
+        start = _ts_to_seconds(m.group(1))
+        end = _ts_to_seconds(m.group(2))
+        raw = m.group(3).strip()
+        # Strip HTML/VTT tags and cue identifiers
+        clean = re.sub(r"<[^>]+>", "", raw).strip()
+        if clean:
+            segments.append(SimpleNamespace(start=start, end=end, text=clean))
+
+    return segments
 
 
 def resolve_source(
@@ -54,35 +118,196 @@ def resolve_source(
     return audio_path, meta
 
 
-def transcribe_audio(
+def _ffprobe_duration(path: Path) -> float:
+    """Return audio duration in seconds via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def split_audio(
     audio_path: Path,
+    output_dir: Path,
+    chunk_minutes: int = DEFAULT_CHUNK_MINUTES,
+    force: bool = False,
+) -> list:
+    """Split audio into chunks at silence boundaries if >3h. Returns list of Paths."""
+    duration = _ffprobe_duration(audio_path)
+    if duration <= LONG_AUDIO_THRESHOLD_S:
+        return [audio_path]
+
+    chunks_dir = output_dir / "chunks"
+    if not force and chunks_dir.exists():
+        existing = sorted(chunks_dir.glob("chunk_*.wav"))
+        if existing:
+            logging.info(f"Using {len(existing)} existing chunks in {chunks_dir}")
+            return existing
+
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Detect silence end points
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-i",
+            str(audio_path),
+            "-af",
+            "silencedetect=noise=-35dB:d=0.5",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    silence_ends = [
+        float(m.group(1))
+        for m in re.finditer(r"silence_end: (\d+\.?\d*)", result.stderr)
+    ]
+
+    # Build split boundaries
+    chunk_secs = chunk_minutes * 60
+    boundaries = [0.0]
+    t = chunk_secs
+    while t < duration:
+        nearest = min(silence_ends, key=lambda s, t=t: abs(s - t), default=None)
+        if nearest and abs(nearest - t) <= 60:
+            boundaries.append(nearest)
+        else:
+            logging.warning(f"No silence near {t:.0f}s — hard split")
+            boundaries.append(t)
+        t += chunk_secs
+    boundaries.append(duration)
+
+    chunks: list[Path] = []
+    for i, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+        chunk_path = chunks_dir / f"chunk_{i:03d}.wav"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(audio_path),
+                "-ss",
+                str(start),
+                "-to",
+                str(end),
+                "-c",
+                "copy",
+                str(chunk_path),
+            ],
+            capture_output=True,
+            check=True,
+        )
+        chunks.append(chunk_path)
+
+    logging.info(f"Split into {len(chunks)} chunks in {chunks_dir}")
+    return chunks
+
+
+def merge_segments(chunks_segments: list[list], offsets: list[float]) -> list:
+    """Merge per-chunk segment lists, applying time offsets. Returns flat list."""
+    merged = []
+    for segs, offset in zip(chunks_segments, offsets):
+        for seg in segs:
+            merged.append(
+                SimpleNamespace(
+                    start=seg.start + offset,
+                    end=seg.end + offset,
+                    text=seg.text,
+                )
+            )
+    return merged
+
+
+def transcribe_audio(
+    audio_path: "Path | list[Path]",
     mode: str,
     model_name: str = DEFAULT_MODEL,
 ) -> tuple[list, object]:
-    """Transcribe audio file using faster-whisper. Returns (segments, info)."""
+    """Transcribe audio (single path or list of chunk paths). Returns (segments, info)."""
     language_map = {"en-ar": None, "ar": "ar", "en": "en"}
     language = language_map[mode]
 
     logging.info(f"Loading model: {model_name}")
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
-    logging.info(f"Transcribing: {audio_path} | mode={mode}")
-    segments_gen, info = model.transcribe(
-        str(audio_path),
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-        word_timestamps=True,
-        language=language,
-    )
-    segments = list(segments_gen)
+    paths = audio_path if isinstance(audio_path, list) else [audio_path]
+    total = len(paths)
 
-    duration = info.duration
-    detected = info.language
-    logging.info(
-        f"Transcription done: {duration:.1f}s, detected language={detected}, segments={len(segments)}"
+    if total == 1:
+        path = paths[0]
+        total_duration = _ffprobe_duration(path)
+        logging.info(f"Transcribing: {path} | mode={mode}")
+        segments_gen, info = model.transcribe(
+            str(path),
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            word_timestamps=True,
+            language=language,
+        )
+        segments = []
+        t0 = time.monotonic()
+        for seg in segments_gen:
+            segments.append(seg)
+            if total_duration > 60:
+                pct = seg.end / total_duration * 100
+                elapsed = time.monotonic() - t0
+                eta = (elapsed / pct * (100 - pct)) if pct > 0 else 0
+                logging.info(
+                    f"[{pct:.0f}%] {elapsed:.0f}s elapsed, ETA {eta:.0f}s"
+                    f" — {seg.text.strip()[:40]}"
+                )
+        logging.info(
+            f"Transcription done: {info.duration:.1f}s,"
+            f" detected language={info.language}, segments={len(segments)}"
+        )
+        return segments, info
+
+    # Multi-chunk path
+    all_segs: list[list] = []
+    offsets: list[float] = []
+    total_duration = 0.0
+    first_info = None
+    for i, path in enumerate(paths):
+        logging.info(f"Transcribing chunk {i + 1}/{total}: {path}")
+        chunk_dur = _ffprobe_duration(path)
+        offsets.append(total_duration)
+        total_duration += chunk_dur
+        segments_gen, info = model.transcribe(
+            str(path),
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            word_timestamps=True,
+            language=language,
+        )
+        all_segs.append(list(segments_gen))
+        if first_info is None:
+            first_info = info
+
+    segments = merge_segments(all_segs, offsets)
+    synthetic_info = SimpleNamespace(
+        duration=total_duration, language=first_info.language
     )
-    return segments, info
+    logging.info(
+        f"Transcription done: {total_duration:.1f}s total,"
+        f" detected language={first_info.language}, segments={len(segments)}"
+    )
+    return segments, synthetic_info
 
 
 def write_raw(segments: list, path: Path) -> None:
@@ -196,9 +421,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.subs_first:
-        logging.info("Phase 2 feature — not yet implemented")
-
     try:
         audio_path, source_meta = resolve_source(
             args.source, args.output_dir, args.force
@@ -222,18 +444,43 @@ def main() -> None:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    try:
-        segments, info = transcribe_audio(audio_path, args.mode, args.model)
-    except RuntimeError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+    # --subs-first: only for YouTube URLs in ar mode
+    segments = None
+    subtitle_source = "whisper"
+
+    if args.subs_first:
+        if args.mode != "ar":
+            logging.info(
+                f"--subs-first ignored for mode {args.mode} — only used in ar mode"
+            )
+        elif Path(args.source).exists():
+            logging.info("--subs-first ignored for local files")
+        else:
+            sub_path = fetch_subtitles(args.source, output_dir)
+            if sub_path:
+                logging.info(f"Subtitles found: {sub_path}")
+                segments = parse_subtitles(sub_path)
+                subtitle_source = "subtitles"
+            else:
+                logging.info("No subtitles found, falling back to Whisper")
+
+    if segments is None:
+        audio_paths = split_audio(audio_path, output_dir, force=args.force)
+        try:
+            segments, info = transcribe_audio(audio_paths, args.mode, args.model)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        duration_seconds = info.duration
+    else:
+        duration_seconds = segments[-1].end if segments else 0.0
 
     meta = {
         **source_meta,
         "language_mode": args.mode,
         "model": args.model,
-        "duration_seconds": info.duration,
-        "subtitle_source": "whisper",
+        "duration_seconds": duration_seconds,
+        "subtitle_source": subtitle_source,
     }
 
     write_raw(segments, raw_path)
