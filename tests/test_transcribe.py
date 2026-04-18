@@ -309,7 +309,10 @@ def test_main_config_mode_default_used(tmp_path, caplog):
         patch("transcribe.write_clean"),
         patch("transcribe.write_meta"),
     ):
-        with patch("sys.argv", ["transcribe.py", str(src), "--output-dir", str(tmp_path / "output")]):
+        with patch(
+            "sys.argv",
+            ["transcribe.py", str(src), "--output-dir", str(tmp_path / "output")],
+        ):
             main()
 
     mock_ta.assert_called_once()
@@ -334,7 +337,14 @@ def test_main_cli_mode_overrides_config(tmp_path):
     ):
         with patch(
             "sys.argv",
-            ["transcribe.py", str(src), "--mode", "en-ar", "--output-dir", str(tmp_path / "output")],
+            [
+                "transcribe.py",
+                str(src),
+                "--mode",
+                "en-ar",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
         ):
             main()
 
@@ -354,7 +364,16 @@ def test_main_dry_run_local_file_exits_zero(tmp_path):
         patch("transcribe.check_ffmpeg"),
         patch("transcribe._ffprobe_duration", return_value=120.0),
         patch("transcribe.transcribe_audio") as mock_ta,
-        patch("sys.argv", ["transcribe.py", str(src), "--dry-run", "--output-dir", str(tmp_path / "output")]),
+        patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                str(src),
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ),
     ):
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -374,7 +393,16 @@ def test_main_dry_run_logs_expected_fields(tmp_path, caplog):
         caplog.at_level(logging.INFO),
     ):
         with pytest.raises(SystemExit):
-            with patch("sys.argv", ["transcribe.py", str(src), "--dry-run", "--output-dir", str(tmp_path / "output")]):
+            with patch(
+                "sys.argv",
+                [
+                    "transcribe.py",
+                    str(src),
+                    "--dry-run",
+                    "--output-dir",
+                    str(tmp_path / "output"),
+                ],
+            ):
                 main()
 
     messages = " ".join(r.message for r in caplog.records)
@@ -645,7 +673,15 @@ def test_main_playlist_calls_run_single_per_entry(tmp_path):
         inst.extract_info.return_value = pl_info
         mock_ydl_cls.return_value = inst
 
-        with patch("sys.argv", ["transcribe.py", "https://yt/playlist", "--output-dir", str(tmp_path / "output")]):
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                "https://yt/playlist",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
             main()
 
     assert mock_run.call_count == 2
@@ -680,7 +716,15 @@ def test_main_playlist_skips_failed_entry(tmp_path, caplog):
         inst.extract_info.return_value = pl_info
         mock_ydl_cls.return_value = inst
 
-        with patch("sys.argv", ["transcribe.py", "https://yt/playlist", "--output-dir", str(tmp_path / "output")]):
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                "https://yt/playlist",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
             main()  # must not raise
 
     assert any("Failed" in r.message for r in caplog.records)
@@ -707,7 +751,16 @@ def test_main_dry_run_playlist_lists_all_entries(tmp_path, caplog):
         mock_ydl_cls.return_value = inst
 
         with pytest.raises(SystemExit) as exc_info:
-            with patch("sys.argv", ["transcribe.py", "https://yt/playlist", "--dry-run", "--output-dir", str(tmp_path / "output")]):
+            with patch(
+                "sys.argv",
+                [
+                    "transcribe.py",
+                    "https://yt/playlist",
+                    "--dry-run",
+                    "--output-dir",
+                    str(tmp_path / "output"),
+                ],
+            ):
                 main()
 
     assert exc_info.value.code == 0

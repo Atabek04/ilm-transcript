@@ -63,7 +63,12 @@ def download_audio(
 
 def is_playlist(url: str) -> bool:
     """Return True if url resolves to a yt-dlp playlist."""
-    opts = {"quiet": True, "extract_flat": True, "skip_download": True, "no_warnings": True}
+    opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "no_warnings": True,
+    }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return bool(info) and info.get("_type") == "playlist"
@@ -134,13 +139,17 @@ if __name__ == "__main__":
                         continue
                     raw_dur = entry.get("duration") or 0
                     from transcribe import _format_duration
+
                     title = entry.get("title", "(unknown)")
                     logging.info(f"[dry-run] Title: {title}")
                     logging.info(f"[dry-run] Duration: {_format_duration(raw_dur)}")
-                    logging.info(f"[dry-run] Would save to: {args.output_dir / sanitize_slug(title)}")
+                    logging.info(
+                        f"[dry-run] Would save to: {args.output_dir / sanitize_slug(title)}"
+                    )
                     logging.info(f"[dry-run] Format: {args.fmt}")
             else:
                 from transcribe import _format_duration
+
                 title = (info.get("title", "") if info else "") or args.url
                 raw_dur = (info.get("duration") or 0) if info else 0
                 slug = sanitize_slug(title) if title else sanitize_slug(args.url)
@@ -155,11 +164,17 @@ if __name__ == "__main__":
             entries = [e for e in (info.get("entries") or []) if e]
             total = len(entries)
             for i, entry in enumerate(entries, 1):
-                entry_url = entry.get("url") or entry.get("webpage_url") or entry.get("id")
+                entry_url = (
+                    entry.get("url") or entry.get("webpage_url") or entry.get("id")
+                )
                 entry_title = entry.get("title", f"entry-{i}")
                 logging.info(f"[{i}/{total}] Downloading: {entry_title}")
                 try:
-                    slug = sanitize_slug(entry_title) if entry_title else sanitize_slug(str(i))
+                    slug = (
+                        sanitize_slug(entry_title)
+                        if entry_title
+                        else sanitize_slug(str(i))
+                    )
                     out_dir = args.output_dir / slug
                     path = download_audio(entry_url, out_dir, args.fmt, args.force)
                     logging.info(f"Saved to: {path}")

@@ -519,7 +519,12 @@ def main() -> None:
             logging.info(f"[dry-run] Would save to: {args.output_dir / slug}")
         else:
             # YouTube URL (single or playlist)
-            ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": True,
+                "skip_download": True,
+            }
             with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(args.source, download=False)
             if info and info.get("_type") == "playlist":
@@ -547,7 +552,12 @@ def main() -> None:
         if is_playlist(args.source):
             import time as _time
 
-            ydl_opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": True,
+                "skip_download": True,
+            }
             import yt_dlp as _yt_dlp
 
             with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -555,7 +565,9 @@ def main() -> None:
             entries = [e for e in (pl_info.get("entries") or []) if e]
             total = len(entries)
             for i, entry in enumerate(entries, 1):
-                entry_url = entry.get("url") or entry.get("webpage_url") or entry.get("id")
+                entry_url = (
+                    entry.get("url") or entry.get("webpage_url") or entry.get("id")
+                )
                 entry_title = entry.get("title", f"entry-{i}")
                 logging.info(f"[{i}/{total}] Processing: {entry_title}")
                 try:

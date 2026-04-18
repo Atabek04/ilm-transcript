@@ -2,7 +2,6 @@
 
 import hashlib
 import logging
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -56,7 +55,9 @@ def test_load_config_absent(tmp_path):
 
 def test_load_config_reads_known_keys(tmp_path):
     cfg = tmp_path / ".transcriber.toml"
-    cfg.write_text('mode = "ar"\nmodel = "large-v3"\noutput_dir = "./out"\n', encoding="utf-8")
+    cfg.write_text(
+        'mode = "ar"\nmodel = "large-v3"\noutput_dir = "./out"\n', encoding="utf-8"
+    )
     with patch("utils.CONFIG_PATH", cfg):
         result = load_config()
     assert result["mode"] == "ar"
