@@ -4,9 +4,9 @@ import json
 import logging
 import re
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from transcribe import resolve_source, write_clean, write_meta, write_raw
+from transcribe import main, resolve_source, write_clean, write_meta, write_raw
 
 
 def _seg(start: float, end: float, text: str) -> SimpleNamespace:
@@ -196,3 +196,110 @@ def test_write_meta_created_at_format(tmp_path):
     write_meta(meta, out)
     data = json.loads(out.read_text(encoding="utf-8"))
     assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["created_at"])
+
+
+# --- main() orchestration ---
+
+
+def _make_fake_info(duration: float = 5.0, language: str = "en") -> MagicMock:
+    info = MagicMock()
+    info.duration = duration
+    info.language = language
+    return info
+
+
+def _run_main(args: list[str]) -> None:
+    with patch("sys.argv", ["transcribe.py"] + args):
+        main()
+
+
+def test_main_skips_transcription_when_outputs_exist(tmp_path, caplog):
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    out_dir = tmp_path / "output" / "lecture"
+    out_dir.mkdir(parents=True)
+    (out_dir / "audio.mp3").symlink_to(src)
+    (out_dir / "transcript_raw.txt").write_text("existing", encoding="utf-8")
+    (out_dir / "meta.json").write_text(
+        json.dumps({"language_mode": "en-ar"}), encoding="utf-8"
+    )
+
+    with (
+        patch("transcribe.transcribe_audio") as mock_ta,
+        patch("transcribe.check_ffmpeg"),
+        caplog.at_level(logging.INFO),
+    ):
+        _run_main(
+            [str(src), "--mode", "en-ar", "--output-dir", str(tmp_path / "output")]
+        )
+
+    mock_ta.assert_not_called()
+    assert any("Skipping" in r.message for r in caplog.records)
+
+
+def test_main_retranscribes_when_mode_differs(tmp_path):
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    out_dir = tmp_path / "output" / "lecture"
+    out_dir.mkdir(parents=True)
+    (out_dir / "audio.mp3").symlink_to(src)
+    (out_dir / "transcript_raw.txt").write_text("existing", encoding="utf-8")
+    (out_dir / "meta.json").write_text(
+        json.dumps({"language_mode": "ar"}), encoding="utf-8"
+    )
+
+    fake_info = _make_fake_info()
+    with (
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.check_ffmpeg"),
+    ):
+        _run_main(
+            [str(src), "--mode", "en-ar", "--output-dir", str(tmp_path / "output")]
+        )
+
+    mock_ta.assert_called_once()
+
+
+def test_main_subs_first_logs_and_continues(tmp_path, caplog):
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+
+    fake_info = _make_fake_info()
+    with (
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)),
+        patch("transcribe.check_ffmpeg"),
+        caplog.at_level(logging.INFO),
+    ):
+        _run_main([str(src), "--subs-first", "--output-dir", str(tmp_path / "output")])
+
+    assert any("Phase 2" in r.message for r in caplog.records)
+
+
+def test_main_force_bypasses_idempotency(tmp_path):
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    out_dir = tmp_path / "output" / "lecture"
+    out_dir.mkdir(parents=True)
+    (out_dir / "audio.mp3").symlink_to(src)
+    (out_dir / "transcript_raw.txt").write_text("old", encoding="utf-8")
+    (out_dir / "meta.json").write_text(
+        json.dumps({"language_mode": "en-ar"}), encoding="utf-8"
+    )
+
+    fake_info = _make_fake_info()
+    with (
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.check_ffmpeg"),
+    ):
+        _run_main(
+            [
+                str(src),
+                "--mode",
+                "en-ar",
+                "--force",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ]
+        )
+
+    mock_ta.assert_called_once()
