@@ -1,5 +1,7 @@
 """Islamic lecture transcription pipeline."""
 
+import datetime
+import json
 import logging
 import os
 import shutil
@@ -79,3 +81,71 @@ def transcribe_audio(
         f"Transcription done: {duration:.1f}s, detected language={detected}, segments={len(segments)}"
     )
     return segments, info
+
+
+def write_raw(segments: list, path: Path) -> None:
+    """Write timestamped segments to transcript_raw.txt."""
+    with open(path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            f.write(f"[{seg.start:.1f}s \u2192 {seg.end:.1f}s] {seg.text.strip()}\n")
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds as 'Xh Ym' or 'Xm Ys'."""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m {s}s"
+
+
+def write_clean(segments: list, meta: dict, path: Path) -> None:
+    """Write paragraph-grouped transcript with YAML frontmatter to transcript_clean.md."""
+    frontmatter = (
+        "---\n"
+        f"source: {meta.get('url') or meta.get('source_path', '')}\n"
+        f"title: {meta.get('title', '')}\n"
+        f"date: {datetime.date.today().isoformat()}\n"
+        f"mode: {meta.get('language_mode', '')}\n"
+        f"duration: {_format_duration(meta.get('duration_seconds', 0))}\n"
+        f"model: {meta.get('model', '')}\n"
+        f"subtitle_source: {meta.get('subtitle_source', 'whisper')}\n"
+        "---\n"
+    )
+
+    paragraphs: list[list[str]] = []
+    current: list[str] = []
+    prev_end: float = 0.0
+
+    for seg in segments:
+        if current and (seg.start - prev_end) > 1.5:
+            paragraphs.append(current)
+            current = []
+        current.append(seg.text.strip())
+        prev_end = seg.end
+
+    if current:
+        paragraphs.append(current)
+
+    body = "\n\n".join(" ".join(p) for p in paragraphs)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(frontmatter + "\n" + body + "\n")
+
+
+def write_meta(meta: dict, path: Path) -> None:
+    """Write run metadata to meta.json."""
+    payload = {
+        "url": meta.get("url"),
+        "title": meta.get("title"),
+        "duration_seconds": meta.get("duration_seconds"),
+        "language_mode": meta.get("language_mode"),
+        "model": meta.get("model"),
+        "subtitle_source": meta.get("subtitle_source", "whisper"),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
