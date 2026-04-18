@@ -49,6 +49,39 @@ def fetch_subtitles(url: str, output_dir: Path) -> "Path | None":
     return matches[0] if matches else None
 
 
+def _ts_to_seconds(ts: str) -> float:
+    """Convert SRT/VTT timestamp string to float seconds."""
+    ts = ts.replace(",", ".")
+    parts = ts.split(":")
+    h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+    return h * 3600 + m * 60 + s
+
+
+def parse_subtitles(path: Path) -> list:
+    """Parse SRT or VTT subtitle file. Returns segments with .start, .end, .text."""
+    text = path.read_text(encoding="utf-8")
+    segments = []
+
+    # Normalise line endings, strip BOM
+    text = text.replace("\r\n", "\n").lstrip("\ufeff")
+
+    # Pattern matches both SRT (HH:MM:SS,mmm) and VTT (HH:MM:SS.mmm)
+    block_re = re.compile(
+        r"(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})[^\n]*\n([\s\S]*?)(?=\n\n|\Z)",
+        re.MULTILINE,
+    )
+    for m in block_re.finditer(text):
+        start = _ts_to_seconds(m.group(1))
+        end = _ts_to_seconds(m.group(2))
+        raw = m.group(3).strip()
+        # Strip HTML/VTT tags and cue identifiers
+        clean = re.sub(r"<[^>]+>", "", raw).strip()
+        if clean:
+            segments.append(SimpleNamespace(start=start, end=end, text=clean))
+
+    return segments
+
+
 def resolve_source(
     source: str,
     output_dir: Path,
