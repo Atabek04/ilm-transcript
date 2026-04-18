@@ -17,10 +17,11 @@ def download_audio(
     output_dir: Path,
     fmt: str = "m4a",
     force: bool = False,
+    stem: str = "audio",
 ) -> Path:
-    """Download audio from URL to output_dir/audio.<fmt>. Returns path to file."""
+    """Download audio from URL to output_dir/{stem}.<fmt>. Returns path to file."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    dest = output_dir / f"audio.{fmt}"
+    dest = output_dir / f"{stem}.{fmt}"
 
     if dest.exists() and dest.stat().st_size > 0 and not force:
         logging.info(f"Already exists, skipping download: {dest}")
@@ -39,7 +40,7 @@ def download_audio(
 
     ydl_opts = {
         "format": "bestaudio/best",
-        "outtmpl": str(output_dir / "audio.%(ext)s"),
+        "outtmpl": str(output_dir / f"{stem}.%(ext)s"),
         "restrictfilenames": True,
         "postprocessors": [
             {
@@ -177,7 +178,7 @@ def main() -> None:
                         else sanitize_slug(str(i))
                     )
                     out_dir = args.output_dir / slug
-                    path = download_audio(entry_url, out_dir, args.fmt, args.force)
+                    path = download_audio(entry_url, out_dir, args.fmt, args.force, stem=slug)
                     logging.info(f"Saved to: {path}")
                 except Exception as exc:
                     logging.error(f"[{i}/{total}] Failed {entry_title}: {exc}")
@@ -188,7 +189,7 @@ def main() -> None:
             title = info.get("title", "") if info else ""
             slug = sanitize_slug(title) if title else sanitize_slug(args.url)
             output_dir = args.output_dir / slug
-            path = download_audio(args.url, output_dir, args.fmt, args.force)
+            path = download_audio(args.url, output_dir, args.fmt, args.force, stem=slug)
             logging.info(f"Saved to: {path}")
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
