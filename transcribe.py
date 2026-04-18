@@ -260,9 +260,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.subs_first:
-        logging.info("Phase 2 feature — not yet implemented")
-
     try:
         audio_path, source_meta = resolve_source(
             args.source, args.output_dir, args.force
@@ -286,18 +283,43 @@ def main() -> None:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    try:
-        segments, info = transcribe_audio(audio_path, args.mode, args.model)
-    except RuntimeError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+    # --subs-first: only for YouTube URLs in ar mode
+    segments = None
+    subtitle_source = "whisper"
+
+    if args.subs_first:
+        if args.mode != "ar":
+            logging.info(
+                f"--subs-first ignored for mode {args.mode} — only used in ar mode"
+            )
+        elif Path(args.source).exists():
+            logging.info("--subs-first ignored for local files")
+        else:
+            sub_path = fetch_subtitles(args.source, output_dir)
+            if sub_path:
+                logging.info(f"Subtitles found: {sub_path}")
+                segments = parse_subtitles(sub_path)
+                subtitle_source = "subtitles"
+            else:
+                logging.info("No subtitles found, falling back to Whisper")
+
+    if segments is None:
+        audio_paths = split_audio(audio_path, output_dir, force=args.force)
+        try:
+            segments, info = transcribe_audio(audio_paths, args.mode, args.model)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        duration_seconds = info.duration
+    else:
+        duration_seconds = segments[-1].end if segments else 0.0
 
     meta = {
         **source_meta,
         "language_mode": args.mode,
         "model": args.model,
-        "duration_seconds": info.duration,
-        "subtitle_source": "whisper",
+        "duration_seconds": duration_seconds,
+        "subtitle_source": subtitle_source,
     }
 
     write_raw(segments, raw_path)
