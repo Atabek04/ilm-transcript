@@ -62,6 +62,14 @@ def download_audio(
     return dest
 
 
+def _best_slug(title: str, video_id: str = "") -> str:
+    """Slug from title; falls back to video_id when title is non-ASCII (e.g. Arabic)."""
+    has_ascii = bool(title.encode("ascii", "ignore").decode("ascii").strip())
+    if has_ascii:
+        return sanitize_slug(title)
+    return video_id or sanitize_slug(title)
+
+
 def is_playlist(url: str) -> bool:
     """Return True if url resolves to a yt-dlp playlist."""
     opts = {
@@ -172,11 +180,7 @@ def main() -> None:
                 entry_title = entry.get("title", f"entry-{i}")
                 logging.info(f"[{i}/{total}] Downloading: {entry_title}")
                 try:
-                    slug = (
-                        sanitize_slug(entry_title)
-                        if entry_title
-                        else sanitize_slug(str(i))
-                    )
+                    slug = _best_slug(entry_title, entry.get("id", ""))
                     out_dir = args.output_dir / slug
                     path = download_audio(entry_url, out_dir, args.fmt, args.force, stem=slug)
                     logging.info(f"Saved to: {path}")
@@ -186,8 +190,9 @@ def main() -> None:
                     logging.info(f"Sleeping {args.sleep_interval}s between downloads")
                     _time.sleep(args.sleep_interval)
         else:
-            title = info.get("title", "") if info else ""
-            slug = sanitize_slug(title) if title else sanitize_slug(args.url)
+            title = (info.get("title") or "") if info else ""
+            video_id = (info.get("id") or "") if info else ""
+            slug = _best_slug(title, video_id)
             output_dir = args.output_dir / slug
             path = download_audio(args.url, output_dir, args.fmt, args.force, stem=slug)
             logging.info(f"Saved to: {path}")
