@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "faster-whisper>=1.0.0",
     "yt-dlp>=2025.1.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [dependency-groups]
