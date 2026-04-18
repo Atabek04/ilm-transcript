@@ -109,9 +109,18 @@ def resolve_source(
         }
         return audio_path, meta
 
-    audio_path = convert.download_audio(source, output_dir, "m4a", force)
+    import yt_dlp
+
+    ydl_opts = {"quiet": True, "no_warnings": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(source, download=False)
+    title = (info.get("title") or "") if info else ""
+    slug = sanitize_slug(title) if title else sanitize_slug(source)
+    dest_dir = output_dir / slug
+
+    audio_path = convert.download_audio(source, dest_dir, "m4a", force)
     meta = {
-        "title": audio_path.parent.name,
+        "title": title,
         "url": source,
         "source_path": None,
     }

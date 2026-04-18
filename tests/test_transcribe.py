@@ -65,32 +65,50 @@ def test_resolve_local_file_idempotent(tmp_path):
     assert audio_path1 == audio_path2
 
 
+def _mock_yt_dlp_ctx(title: str = "Test Lecture"):
+    """Return a context-manager mock for yt_dlp.YoutubeDL that yields fake info."""
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info = MagicMock(return_value={"title": title})
+    return mock_ydl
+
+
 def test_resolve_youtube_url_calls_download_audio(tmp_path):
-    fake_audio = tmp_path / "output" / "some-slug" / "audio.m4a"
+    slug = "test-lecture"
+    fake_audio = tmp_path / slug / "audio.m4a"
     fake_audio.parent.mkdir(parents=True)
     fake_audio.write_bytes(b"audio")
 
-    with patch("convert.download_audio", return_value=fake_audio) as mock_dl:
-        audio_path, meta = resolve_source("https://youtube.com/watch?v=abc", tmp_path)
+    mock_ydl = _mock_yt_dlp_ctx("Test Lecture")
+    with patch("yt_dlp.YoutubeDL", return_value=mock_ydl):
+        with patch("convert.download_audio", return_value=fake_audio) as mock_dl:
+            audio_path, meta = resolve_source(
+                "https://youtube.com/watch?v=abc", tmp_path
+            )
 
     mock_dl.assert_called_once_with(
-        "https://youtube.com/watch?v=abc", tmp_path, "m4a", False
+        "https://youtube.com/watch?v=abc", tmp_path / slug, "m4a", False
     )
     assert audio_path == fake_audio
     assert meta["url"] == "https://youtube.com/watch?v=abc"
+    assert meta["title"] == "Test Lecture"
     assert meta["source_path"] is None
 
 
 def test_resolve_youtube_url_force_passed_through(tmp_path):
-    fake_audio = tmp_path / "output" / "slug" / "audio.m4a"
+    slug = "test-lecture"
+    fake_audio = tmp_path / slug / "audio.m4a"
     fake_audio.parent.mkdir(parents=True)
     fake_audio.write_bytes(b"audio")
 
-    with patch("convert.download_audio", return_value=fake_audio) as mock_dl:
-        resolve_source("https://youtube.com/watch?v=abc", tmp_path, force=True)
+    mock_ydl = _mock_yt_dlp_ctx("Test Lecture")
+    with patch("yt_dlp.YoutubeDL", return_value=mock_ydl):
+        with patch("convert.download_audio", return_value=fake_audio) as mock_dl:
+            resolve_source("https://youtube.com/watch?v=abc", tmp_path, force=True)
 
     mock_dl.assert_called_once_with(
-        "https://youtube.com/watch?v=abc", tmp_path, "m4a", True
+        "https://youtube.com/watch?v=abc", tmp_path / slug, "m4a", True
     )
 
 
