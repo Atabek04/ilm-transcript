@@ -122,9 +122,13 @@ def _ffprobe_duration(path: Path) -> float:
     """Return audio duration in seconds via ffprobe."""
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
             str(path),
         ],
         capture_output=True,
@@ -155,9 +159,18 @@ def split_audio(
 
     # Detect silence end points
     result = subprocess.run(
-        ["ffmpeg", "-i", str(audio_path), "-af", "silencedetect=noise=-35dB:d=0.5",
-         "-f", "null", "-"],
-        capture_output=True, text=True,
+        [
+            "ffmpeg",
+            "-i",
+            str(audio_path),
+            "-af",
+            "silencedetect=noise=-35dB:d=0.5",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
     )
     silence_ends = [
         float(m.group(1))
@@ -182,10 +195,21 @@ def split_audio(
     for i, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
         chunk_path = chunks_dir / f"chunk_{i:03d}.wav"
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(audio_path),
-             "-ss", str(start), "-to", str(end),
-             "-c", "copy", str(chunk_path)],
-            capture_output=True, check=True,
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(audio_path),
+                "-ss",
+                str(start),
+                "-to",
+                str(end),
+                "-c",
+                "copy",
+                str(chunk_path),
+            ],
+            capture_output=True,
+            check=True,
         )
         chunks.append(chunk_path)
 
@@ -276,7 +300,9 @@ def transcribe_audio(
             first_info = info
 
     segments = merge_segments(all_segs, offsets)
-    synthetic_info = SimpleNamespace(duration=total_duration, language=first_info.language)
+    synthetic_info = SimpleNamespace(
+        duration=total_duration, language=first_info.language
+    )
     logging.info(
         f"Transcription done: {total_duration:.1f}s total,"
         f" detected language={first_info.language}, segments={len(segments)}"
