@@ -291,6 +291,97 @@ def test_main_subs_first_logs_and_continues(tmp_path, caplog):
     assert any("ignored" in r.message for r in caplog.records)
 
 
+# --- config wiring ---
+
+
+def test_main_config_mode_default_used(tmp_path, caplog):
+    """Config mode is used when no --mode CLI arg is given."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    fake_info = _make_fake_info()
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe.load_config", return_value={"mode": "ar"}),
+        patch("transcribe.split_audio", return_value=[src]),
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.write_raw"),
+        patch("transcribe.write_clean"),
+        patch("transcribe.write_meta"),
+    ):
+        with patch("sys.argv", ["transcribe.py", str(src), "--output-dir", str(tmp_path / "output")]):
+            main()
+
+    mock_ta.assert_called_once()
+    call_args = mock_ta.call_args
+    assert call_args[0][1] == "ar"  # mode argument
+
+
+def test_main_cli_mode_overrides_config(tmp_path):
+    """Explicit --mode CLI arg wins over config value."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    fake_info = _make_fake_info()
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe.load_config", return_value={"mode": "ar"}),
+        patch("transcribe.split_audio", return_value=[src]),
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.write_raw"),
+        patch("transcribe.write_clean"),
+        patch("transcribe.write_meta"),
+    ):
+        with patch(
+            "sys.argv",
+            ["transcribe.py", str(src), "--mode", "en-ar", "--output-dir", str(tmp_path / "output")],
+        ):
+            main()
+
+    call_args = mock_ta.call_args
+    assert call_args[0][1] == "en-ar"
+
+
+# --- dry-run ---
+
+
+def test_main_dry_run_local_file_exits_zero(tmp_path):
+    """--dry-run on a local file exits 0 without transcribing."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio data")
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe._ffprobe_duration", return_value=120.0),
+        patch("transcribe.transcribe_audio") as mock_ta,
+        patch("sys.argv", ["transcribe.py", str(src), "--dry-run", "--output-dir", str(tmp_path / "output")]),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code == 0
+    mock_ta.assert_not_called()
+
+
+def test_main_dry_run_logs_expected_fields(tmp_path, caplog):
+    """--dry-run logs file name, duration, and save path."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio data")
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe._ffprobe_duration", return_value=3600.0),
+        caplog.at_level(logging.INFO),
+    ):
+        with pytest.raises(SystemExit):
+            with patch("sys.argv", ["transcribe.py", str(src), "--dry-run", "--output-dir", str(tmp_path / "output")]):
+                main()
+
+    messages = " ".join(r.message for r in caplog.records)
+    assert "dry-run" in messages
+    assert "lecture.mp3" in messages
+
+
 def test_main_force_bypasses_idempotency(tmp_path):
     src = tmp_path / "lecture.mp3"
     src.write_bytes(b"audio")
