@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 ilm = "transcribe:main"
+ilm-dl = "convert:main"
 
 [tool.setuptools]
 py-modules = ["transcribe", "convert", "utils"]

@@ -74,7 +74,8 @@ def is_playlist(url: str) -> bool:
     return bool(info) and info.get("_type") == "playlist"
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI entry point for the audio downloader."""
     import time as _time
 
     configure_logging()
@@ -192,3 +193,7 @@ if __name__ == "__main__":
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
