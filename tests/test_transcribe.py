@@ -612,3 +612,106 @@ def test_main_subs_first_non_ar_logs_ignored(tmp_path, caplog):
             main()
 
     assert any("ignored" in r.message for r in caplog.records)
+
+
+# --- playlist orchestration ---
+
+
+def _fake_playlist_info(entries):
+    """Build a fake yt-dlp playlist info dict."""
+    return {
+        "_type": "playlist",
+        "entries": entries,
+    }
+
+
+def test_main_playlist_calls_run_single_per_entry(tmp_path):
+    """Playlist source triggers _run_single for each entry."""
+    entries = [
+        {"title": "Entry One", "url": "https://yt/1", "duration": 60},
+        {"title": "Entry Two", "url": "https://yt/2", "duration": 90},
+    ]
+    pl_info = _fake_playlist_info(entries)
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("convert.is_playlist", return_value=True),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("transcribe._run_single") as mock_run,
+    ):
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = pl_info
+        mock_ydl_cls.return_value = inst
+
+        with patch("sys.argv", ["transcribe.py", "https://yt/playlist", "--output-dir", str(tmp_path / "output")]):
+            main()
+
+    assert mock_run.call_count == 2
+
+
+def test_main_playlist_skips_failed_entry(tmp_path, caplog):
+    """A failing entry in a playlist is logged and skipped."""
+    entries = [
+        {"title": "Good Entry", "url": "https://yt/1", "duration": 60},
+        {"title": "Bad Entry", "url": "https://yt/2", "duration": 90},
+    ]
+    pl_info = _fake_playlist_info(entries)
+
+    call_count = 0
+
+    def fake_run(source, args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("Download failed")
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("convert.is_playlist", return_value=True),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("transcribe._run_single", side_effect=fake_run),
+        caplog.at_level(logging.ERROR),
+    ):
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = pl_info
+        mock_ydl_cls.return_value = inst
+
+        with patch("sys.argv", ["transcribe.py", "https://yt/playlist", "--output-dir", str(tmp_path / "output")]):
+            main()  # must not raise
+
+    assert any("Failed" in r.message for r in caplog.records)
+
+
+def test_main_dry_run_playlist_lists_all_entries(tmp_path, caplog):
+    """--dry-run on a playlist logs all entry titles without processing."""
+    entries = [
+        {"title": "Lecture One", "url": "https://yt/1", "duration": 3600},
+        {"title": "Lecture Two", "url": "https://yt/2", "duration": 7200},
+    ]
+    pl_info = _fake_playlist_info(entries)
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("transcribe._run_single") as mock_run,
+        caplog.at_level(logging.INFO),
+    ):
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = pl_info
+        mock_ydl_cls.return_value = inst
+
+        with pytest.raises(SystemExit) as exc_info:
+            with patch("sys.argv", ["transcribe.py", "https://yt/playlist", "--dry-run", "--output-dir", str(tmp_path / "output")]):
+                main()
+
+    assert exc_info.value.code == 0
+    mock_run.assert_not_called()
+    messages = " ".join(r.message for r in caplog.records)
+    assert "Lecture One" in messages
+    assert "Lecture Two" in messages
