@@ -459,6 +459,7 @@ def test_main_subs_first_ar_uses_subtitles_skips_whisper(tmp_path):
 
     with (
         patch("transcribe.check_ffmpeg"),
+        patch("convert.is_playlist", return_value=False),
         patch(
             "transcribe.resolve_source",
             return_value=(
