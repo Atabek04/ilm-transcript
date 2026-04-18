@@ -1,16 +1,18 @@
 """Islamic lecture transcription pipeline."""
 
+import argparse
 import datetime
 import json
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from faster_whisper import WhisperModel
 
 import convert
-from utils import sanitize_slug
+from utils import check_ffmpeg, configure_logging, sanitize_slug
 
 DEFAULT_MODEL = "large-v3-turbo"
 VALID_MODES = {"en-ar", "ar", "en"}
@@ -149,3 +151,96 @@ def write_meta(meta: dict, path: Path) -> None:
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def main() -> None:
+    """CLI entry point for the transcription pipeline."""
+    configure_logging()
+
+    try:
+        check_ffmpeg()
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        description="Transcribe Islamic lectures from YouTube or local audio files."
+    )
+    parser.add_argument("source", help="YouTube URL or path to local audio/video file")
+    parser.add_argument(
+        "--mode",
+        choices=["en-ar", "ar", "en"],
+        default="en-ar",
+        help="Transcription mode (default: en-ar)",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Whisper model name (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--subs-first",
+        action="store_true",
+        help="Try YouTube subtitles before Whisper (YouTube only)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download and re-transcribe even if output exists",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("./output"),
+        help="Output directory (default: ./output)",
+    )
+    args = parser.parse_args()
+
+    if args.subs_first:
+        logging.info("Phase 2 feature — not yet implemented")
+
+    try:
+        audio_path, source_meta = resolve_source(
+            args.source, args.output_dir, args.force
+        )
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    output_dir = audio_path.parent
+    raw_path = output_dir / "transcript_raw.txt"
+    meta_path = output_dir / "meta.json"
+
+    if not args.force and raw_path.exists() and meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            if existing.get("language_mode") == args.mode:
+                logging.info(
+                    f"Skipping transcription — outputs exist for mode {args.mode}"
+                )
+                return
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    try:
+        segments, info = transcribe_audio(audio_path, args.mode, args.model)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    meta = {
+        **source_meta,
+        "language_mode": args.mode,
+        "model": args.model,
+        "duration_seconds": info.duration,
+        "subtitle_source": "whisper",
+    }
+
+    write_raw(segments, raw_path)
+    write_clean(segments, meta, output_dir / "transcript_clean.md")
+    write_meta(meta, meta_path)
+    logging.info(f"Done. Output: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
