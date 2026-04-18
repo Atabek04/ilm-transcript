@@ -5,9 +5,13 @@ import datetime
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from faster_whisper import WhisperModel
 
@@ -16,6 +20,33 @@ from utils import check_ffmpeg, configure_logging, sanitize_slug
 
 DEFAULT_MODEL = "large-v3-turbo"
 VALID_MODES = {"en-ar", "ar", "en"}
+LONG_AUDIO_THRESHOLD_S = 10800  # 3 hours
+DEFAULT_CHUNK_MINUTES = 30
+
+
+def fetch_subtitles(url: str, output_dir: Path) -> "Path | None":
+    """Fetch Arabic subtitles from YouTube. Returns path to sub file or None."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ydl_opts = {
+        "writeautomaticsub": True,
+        "writesubtitles": True,
+        "subtitleslangs": ["ar"],
+        "skip_download": True,
+        "outtmpl": str(output_dir / "subs"),
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        logging.warning(f"Subtitle fetch failed: {e}")
+        return None
+
+    matches = list(output_dir.glob("subs.ar.*"))
+    return matches[0] if matches else None
 
 
 def resolve_source(
