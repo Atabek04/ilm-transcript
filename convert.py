@@ -113,6 +113,10 @@ def main() -> None:
         help="Output directory (default: ./output)",
     )
     parser.add_argument(
+        "--title",
+        help="Override filename (slug derived from this value)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Re-download even if file exists",
@@ -190,9 +194,12 @@ def main() -> None:
                     logging.info(f"Sleeping {args.sleep_interval}s between downloads")
                     _time.sleep(args.sleep_interval)
         else:
-            title = (info.get("title") or "") if info else ""
-            video_id = (info.get("id") or "") if info else ""
-            slug = _best_slug(title, video_id)
+            if args.title:
+                slug = sanitize_slug(args.title) or args.title
+            else:
+                title = (info.get("title") or "") if info else ""
+                video_id = (info.get("id") or "") if info else ""
+                slug = _best_slug(title, video_id)
             output_dir = args.output_dir / slug
             path = download_audio(args.url, output_dir, args.fmt, args.force, stem=slug)
             logging.info(f"Saved to: {path}")
