@@ -1,0 +1,15 @@
+[project]
+name = "ilm-transcript"
+version = "0.1.0"
+description = "Local CLI tool for transcribing Islamic lectures from YouTube or local audio files"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "yt-dlp>=2025.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.11",
+]
