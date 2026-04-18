@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from faster_whisper import WhisperModel
 
 import convert
-from utils import check_ffmpeg, configure_logging, sanitize_slug
+from utils import check_ffmpeg, configure_logging, load_config, sanitize_slug
 
 DEFAULT_MODEL = "large-v3-turbo"
 VALID_MODES = {"en-ar", "ar", "en"}
@@ -378,56 +378,12 @@ def write_meta(meta: dict, path: Path) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-def main() -> None:
-    """CLI entry point for the transcription pipeline."""
-    configure_logging()
-
+def _run_single(source: str, args: object) -> None:
+    """Run the full download → split → transcribe → write pipeline for one source."""
     try:
-        check_ffmpeg()
+        audio_path, source_meta = resolve_source(source, args.output_dir, args.force)
     except RuntimeError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-
-    parser = argparse.ArgumentParser(
-        description="Transcribe Islamic lectures from YouTube or local audio files."
-    )
-    parser.add_argument("source", help="YouTube URL or path to local audio/video file")
-    parser.add_argument(
-        "--mode",
-        choices=["en-ar", "ar", "en"],
-        default="en-ar",
-        help="Transcription mode (default: en-ar)",
-    )
-    parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"Whisper model name (default: {DEFAULT_MODEL})",
-    )
-    parser.add_argument(
-        "--subs-first",
-        action="store_true",
-        help="Try YouTube subtitles before Whisper (YouTube only)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-download and re-transcribe even if output exists",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("./output"),
-        help="Output directory (default: ./output)",
-    )
-    args = parser.parse_args()
-
-    try:
-        audio_path, source_meta = resolve_source(
-            args.source, args.output_dir, args.force
-        )
-    except RuntimeError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(str(e)) from e
 
     output_dir = audio_path.parent
     raw_path = output_dir / "transcript_raw.txt"
@@ -453,10 +409,10 @@ def main() -> None:
             logging.info(
                 f"--subs-first ignored for mode {args.mode} — only used in ar mode"
             )
-        elif Path(args.source).exists():
+        elif Path(source).exists():
             logging.info("--subs-first ignored for local files")
         else:
-            sub_path = fetch_subtitles(args.source, output_dir)
+            sub_path = fetch_subtitles(source, output_dir)
             if sub_path:
                 logging.info(f"Subtitles found: {sub_path}")
                 segments = parse_subtitles(sub_path)
@@ -466,11 +422,7 @@ def main() -> None:
 
     if segments is None:
         audio_paths = split_audio(audio_path, output_dir, force=args.force)
-        try:
-            segments, info = transcribe_audio(audio_paths, args.mode, args.model)
-        except RuntimeError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+        segments, info = transcribe_audio(audio_paths, args.mode, args.model)
         duration_seconds = info.duration
     else:
         duration_seconds = segments[-1].end if segments else 0.0
@@ -487,6 +439,151 @@ def main() -> None:
     write_clean(segments, meta, output_dir / "transcript_clean.md")
     write_meta(meta, meta_path)
     logging.info(f"Done. Output: {output_dir}")
+
+
+def main() -> None:
+    """CLI entry point for the transcription pipeline."""
+    configure_logging()
+
+    try:
+        check_ffmpeg()
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    cfg = load_config()
+    logging.debug("Config loaded from ~/.transcriber.toml")
+
+    parser = argparse.ArgumentParser(
+        description="Transcribe Islamic lectures from YouTube or local audio files."
+    )
+    parser.add_argument("source", help="YouTube URL or path to local audio/video file")
+    parser.add_argument(
+        "--mode",
+        choices=["en-ar", "ar", "en"],
+        help="Transcription mode (default: en-ar)",
+    )
+    parser.add_argument(
+        "--model",
+        help=f"Whisper model name (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--subs-first",
+        action="store_true",
+        help="Try YouTube subtitles before Whisper (YouTube only)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download and re-transcribe even if output exists",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory (default: ./output)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show title/duration/path without downloading or transcribing",
+    )
+    parser.add_argument(
+        "--sleep-interval",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Seconds to sleep between playlist entries (default: 0)",
+    )
+    parser.set_defaults(
+        mode=cfg.get("mode", "en-ar"),
+        model=cfg.get("model", DEFAULT_MODEL),
+        output_dir=Path(cfg.get("output_dir", "./output")),
+    )
+    args = parser.parse_args()
+
+    # --dry-run: show info without downloading or transcribing
+    if args.dry_run:
+        import yt_dlp as _yt_dlp
+
+        if Path(args.source).exists():
+            src = Path(args.source).resolve()
+            size_mb = src.stat().st_size / (1024 * 1024)
+            try:
+                dur = _ffprobe_duration(src)
+                dur_str = _format_duration(dur)
+            except Exception:
+                dur_str = "unknown"
+            slug = sanitize_slug(src.stem)
+            logging.info(f"[dry-run] File: {src.name} ({size_mb:.1f} MB)")
+            logging.info(f"[dry-run] Duration: {dur_str}")
+            logging.info(f"[dry-run] Would save to: {args.output_dir / slug}")
+        else:
+            # YouTube URL (single or playlist)
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": True,
+                "skip_download": True,
+            }
+            with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(args.source, download=False)
+            if info and info.get("_type") == "playlist":
+                entries = [e for e in (info.get("entries") or []) if e]
+                for entry in entries:
+                    title = entry.get("title", "(unknown)")
+                    raw_dur = entry.get("duration") or 0
+                    slug = sanitize_slug(title)
+                    logging.info(f"[dry-run] Title: {title}")
+                    logging.info(f"[dry-run] Duration: {_format_duration(raw_dur)}")
+                    logging.info(f"[dry-run] Would save to: {args.output_dir / slug}")
+            else:
+                title = (info.get("title", "") if info else "") or args.source
+                raw_dur = (info.get("duration") or 0) if info else 0
+                slug = sanitize_slug(title)
+                logging.info(f"[dry-run] Title: {title}")
+                logging.info(f"[dry-run] Duration: {_format_duration(raw_dur)}")
+                logging.info(f"[dry-run] Would save to: {args.output_dir / slug}")
+        sys.exit(0)
+
+    # Playlist batch processing for YouTube playlists
+    if not Path(args.source).exists():
+        from convert import is_playlist
+
+        if is_playlist(args.source):
+            import time as _time
+
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": True,
+                "skip_download": True,
+            }
+            import yt_dlp as _yt_dlp
+
+            with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                pl_info = ydl.extract_info(args.source, download=False)
+            entries = [e for e in (pl_info.get("entries") or []) if e]
+            total = len(entries)
+            for i, entry in enumerate(entries, 1):
+                entry_url = (
+                    entry.get("url") or entry.get("webpage_url") or entry.get("id")
+                )
+                entry_title = entry.get("title", f"entry-{i}")
+                logging.info(f"[{i}/{total}] Processing: {entry_title}")
+                try:
+                    _run_single(entry_url, args)
+                except Exception as exc:
+                    logging.error(f"[{i}/{total}] Failed {entry_title}: {exc}")
+                if args.sleep_interval and i < total:
+                    logging.info(f"Sleeping {args.sleep_interval}s between entries")
+                    _time.sleep(args.sleep_interval)
+            return
+
+    try:
+        _run_single(args.source, args)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

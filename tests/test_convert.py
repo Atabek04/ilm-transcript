@@ -97,3 +97,44 @@ def test_progress_hook_finished(tmp_path, caplog):
         captured_hook({"status": "finished", "filename": "audio.m4a"})
 
     assert any("Download done" in r.message for r in caplog.records)
+
+
+# --- is_playlist ---
+
+
+def test_is_playlist_returns_true_for_playlist():
+    from convert import is_playlist
+
+    fake_info = {"_type": "playlist", "entries": []}
+    with patch("yt_dlp.YoutubeDL") as mock_ydl:
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = fake_info
+        mock_ydl.return_value = inst
+        assert is_playlist("https://youtube.com/playlist?list=PL123") is True
+
+
+def test_is_playlist_returns_false_for_single_video():
+    from convert import is_playlist
+
+    fake_info = {"_type": "video", "id": "abc123"}
+    with patch("yt_dlp.YoutubeDL") as mock_ydl:
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = fake_info
+        mock_ydl.return_value = inst
+        assert is_playlist("https://youtube.com/watch?v=abc123") is False
+
+
+def test_is_playlist_returns_false_when_info_is_none():
+    from convert import is_playlist
+
+    with patch("yt_dlp.YoutubeDL") as mock_ydl:
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = None
+        mock_ydl.return_value = inst
+        assert is_playlist("https://example.com") is False

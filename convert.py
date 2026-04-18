@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from utils import check_ffmpeg, configure_logging, sanitize_slug
+from utils import check_ffmpeg, configure_logging, load_config, sanitize_slug
 
 SUPPORTED_FORMATS = {"m4a", "mp3", "wav", "opus", "flac"}
 
@@ -61,13 +61,31 @@ def download_audio(
     return dest
 
 
+def is_playlist(url: str) -> bool:
+    """Return True if url resolves to a yt-dlp playlist."""
+    opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return bool(info) and info.get("_type") == "playlist"
+
+
 if __name__ == "__main__":
+    import time as _time
+
     configure_logging()
     try:
         check_ffmpeg()
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    cfg = load_config()
+    logging.debug("Config loaded from ~/.transcriber.toml")
 
     parser = argparse.ArgumentParser(
         description="Download YouTube video/playlist audio in high quality."
@@ -77,13 +95,11 @@ if __name__ == "__main__":
         "--format",
         dest="fmt",
         choices=sorted(SUPPORTED_FORMATS),
-        default="m4a",
         help="Output audio format (default: m4a)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./output"),
         help="Output directory (default: ./output)",
     )
     parser.add_argument(
@@ -91,17 +107,88 @@ if __name__ == "__main__":
         action="store_true",
         help="Re-download even if file exists",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show title/duration/format/path without downloading",
+    )
+    parser.add_argument(
+        "--sleep-interval",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Seconds to sleep between playlist entries (default: 0)",
+    )
+    parser.set_defaults(
+        fmt=cfg.get("format", "m4a"),
+        output_dir=Path(cfg.get("output_dir", "./output")),
+    )
     args = parser.parse_args()
 
     try:
         ydl_info_opts = {"quiet": True, "no_warnings": True}
         with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
             info = ydl.extract_info(args.url, download=False)
-        title = info.get("title", "") if info else ""
-        slug = sanitize_slug(title) if title else sanitize_slug(args.url)
-        output_dir = args.output_dir / slug
-        path = download_audio(args.url, output_dir, args.fmt, args.force)
-        logging.info(f"Saved to: {path}")
+
+        if args.dry_run:
+            # Dry-run for single video or playlist
+            if info and info.get("_type") == "playlist":
+                entries = info.get("entries") or []
+                for entry in entries:
+                    if not entry:
+                        continue
+                    raw_dur = entry.get("duration") or 0
+                    from transcribe import _format_duration
+
+                    title = entry.get("title", "(unknown)")
+                    logging.info(f"[dry-run] Title: {title}")
+                    logging.info(f"[dry-run] Duration: {_format_duration(raw_dur)}")
+                    logging.info(
+                        f"[dry-run] Would save to: {args.output_dir / sanitize_slug(title)}"
+                    )
+                    logging.info(f"[dry-run] Format: {args.fmt}")
+            else:
+                from transcribe import _format_duration
+
+                title = (info.get("title", "") if info else "") or args.url
+                raw_dur = (info.get("duration") or 0) if info else 0
+                slug = sanitize_slug(title) if title else sanitize_slug(args.url)
+                logging.info(f"[dry-run] Title: {title}")
+                logging.info(f"[dry-run] Duration: {_format_duration(raw_dur)}")
+                logging.info(f"[dry-run] Format: {args.fmt}")
+                logging.info(f"[dry-run] Would save to: {args.output_dir / slug}")
+            sys.exit(0)
+
+        # Playlist batch or single video
+        if info and info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if e]
+            total = len(entries)
+            for i, entry in enumerate(entries, 1):
+                entry_url = (
+                    entry.get("url") or entry.get("webpage_url") or entry.get("id")
+                )
+                entry_title = entry.get("title", f"entry-{i}")
+                logging.info(f"[{i}/{total}] Downloading: {entry_title}")
+                try:
+                    slug = (
+                        sanitize_slug(entry_title)
+                        if entry_title
+                        else sanitize_slug(str(i))
+                    )
+                    out_dir = args.output_dir / slug
+                    path = download_audio(entry_url, out_dir, args.fmt, args.force)
+                    logging.info(f"Saved to: {path}")
+                except Exception as exc:
+                    logging.error(f"[{i}/{total}] Failed {entry_title}: {exc}")
+                if args.sleep_interval and i < total:
+                    logging.info(f"Sleeping {args.sleep_interval}s between downloads")
+                    _time.sleep(args.sleep_interval)
+        else:
+            title = info.get("title", "") if info else ""
+            slug = sanitize_slug(title) if title else sanitize_slug(args.url)
+            output_dir = args.output_dir / slug
+            path = download_audio(args.url, output_dir, args.fmt, args.force)
+            logging.info(f"Saved to: {path}")
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)

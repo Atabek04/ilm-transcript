@@ -291,6 +291,125 @@ def test_main_subs_first_logs_and_continues(tmp_path, caplog):
     assert any("ignored" in r.message for r in caplog.records)
 
 
+# --- config wiring ---
+
+
+def test_main_config_mode_default_used(tmp_path, caplog):
+    """Config mode is used when no --mode CLI arg is given."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    fake_info = _make_fake_info()
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe.load_config", return_value={"mode": "ar"}),
+        patch("transcribe.split_audio", return_value=[src]),
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.write_raw"),
+        patch("transcribe.write_clean"),
+        patch("transcribe.write_meta"),
+    ):
+        with patch(
+            "sys.argv",
+            ["transcribe.py", str(src), "--output-dir", str(tmp_path / "output")],
+        ):
+            main()
+
+    mock_ta.assert_called_once()
+    call_args = mock_ta.call_args
+    assert call_args[0][1] == "ar"  # mode argument
+
+
+def test_main_cli_mode_overrides_config(tmp_path):
+    """Explicit --mode CLI arg wins over config value."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio")
+    fake_info = _make_fake_info()
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe.load_config", return_value={"mode": "ar"}),
+        patch("transcribe.split_audio", return_value=[src]),
+        patch("transcribe.transcribe_audio", return_value=([], fake_info)) as mock_ta,
+        patch("transcribe.write_raw"),
+        patch("transcribe.write_clean"),
+        patch("transcribe.write_meta"),
+    ):
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                str(src),
+                "--mode",
+                "en-ar",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
+            main()
+
+    call_args = mock_ta.call_args
+    assert call_args[0][1] == "en-ar"
+
+
+# --- dry-run ---
+
+
+def test_main_dry_run_local_file_exits_zero(tmp_path):
+    """--dry-run on a local file exits 0 without transcribing."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio data")
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe._ffprobe_duration", return_value=120.0),
+        patch("transcribe.transcribe_audio") as mock_ta,
+        patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                str(src),
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code == 0
+    mock_ta.assert_not_called()
+
+
+def test_main_dry_run_logs_expected_fields(tmp_path, caplog):
+    """--dry-run logs file name, duration, and save path."""
+    src = tmp_path / "lecture.mp3"
+    src.write_bytes(b"audio data")
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("transcribe._ffprobe_duration", return_value=3600.0),
+        caplog.at_level(logging.INFO),
+    ):
+        with pytest.raises(SystemExit):
+            with patch(
+                "sys.argv",
+                [
+                    "transcribe.py",
+                    str(src),
+                    "--dry-run",
+                    "--output-dir",
+                    str(tmp_path / "output"),
+                ],
+            ):
+                main()
+
+    messages = " ".join(r.message for r in caplog.records)
+    assert "dry-run" in messages
+    assert "lecture.mp3" in messages
+
+
 def test_main_force_bypasses_idempotency(tmp_path):
     src = tmp_path / "lecture.mp3"
     src.write_bytes(b"audio")
@@ -459,6 +578,7 @@ def test_main_subs_first_ar_uses_subtitles_skips_whisper(tmp_path):
 
     with (
         patch("transcribe.check_ffmpeg"),
+        patch("convert.is_playlist", return_value=False),
         patch(
             "transcribe.resolve_source",
             return_value=(
@@ -520,3 +640,131 @@ def test_main_subs_first_non_ar_logs_ignored(tmp_path, caplog):
             main()
 
     assert any("ignored" in r.message for r in caplog.records)
+
+
+# --- playlist orchestration ---
+
+
+def _fake_playlist_info(entries):
+    """Build a fake yt-dlp playlist info dict."""
+    return {
+        "_type": "playlist",
+        "entries": entries,
+    }
+
+
+def test_main_playlist_calls_run_single_per_entry(tmp_path):
+    """Playlist source triggers _run_single for each entry."""
+    entries = [
+        {"title": "Entry One", "url": "https://yt/1", "duration": 60},
+        {"title": "Entry Two", "url": "https://yt/2", "duration": 90},
+    ]
+    pl_info = _fake_playlist_info(entries)
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("convert.is_playlist", return_value=True),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("transcribe._run_single") as mock_run,
+    ):
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = pl_info
+        mock_ydl_cls.return_value = inst
+
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                "https://yt/playlist",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
+            main()
+
+    assert mock_run.call_count == 2
+
+
+def test_main_playlist_skips_failed_entry(tmp_path, caplog):
+    """A failing entry in a playlist is logged and skipped."""
+    entries = [
+        {"title": "Good Entry", "url": "https://yt/1", "duration": 60},
+        {"title": "Bad Entry", "url": "https://yt/2", "duration": 90},
+    ]
+    pl_info = _fake_playlist_info(entries)
+
+    call_count = 0
+
+    def fake_run(source, args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("Download failed")
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("convert.is_playlist", return_value=True),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("transcribe._run_single", side_effect=fake_run),
+        caplog.at_level(logging.ERROR),
+    ):
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = pl_info
+        mock_ydl_cls.return_value = inst
+
+        with patch(
+            "sys.argv",
+            [
+                "transcribe.py",
+                "https://yt/playlist",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        ):
+            main()  # must not raise
+
+    assert any("Failed" in r.message for r in caplog.records)
+
+
+def test_main_dry_run_playlist_lists_all_entries(tmp_path, caplog):
+    """--dry-run on a playlist logs all entry titles without processing."""
+    entries = [
+        {"title": "Lecture One", "url": "https://yt/1", "duration": 3600},
+        {"title": "Lecture Two", "url": "https://yt/2", "duration": 7200},
+    ]
+    pl_info = _fake_playlist_info(entries)
+
+    with (
+        patch("transcribe.check_ffmpeg"),
+        patch("yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("transcribe._run_single") as mock_run,
+        caplog.at_level(logging.INFO),
+    ):
+        inst = MagicMock()
+        inst.__enter__ = lambda s: s
+        inst.__exit__ = MagicMock(return_value=False)
+        inst.extract_info.return_value = pl_info
+        mock_ydl_cls.return_value = inst
+
+        with pytest.raises(SystemExit) as exc_info:
+            with patch(
+                "sys.argv",
+                [
+                    "transcribe.py",
+                    "https://yt/playlist",
+                    "--dry-run",
+                    "--output-dir",
+                    str(tmp_path / "output"),
+                ],
+            ):
+                main()
+
+    assert exc_info.value.code == 0
+    mock_run.assert_not_called()
+    messages = " ".join(r.message for r in caplog.records)
+    assert "Lecture One" in messages
+    assert "Lecture Two" in messages
