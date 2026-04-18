@@ -13,8 +13,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from faster_whisper import WhisperModel
-
 import convert
 from utils import check_ffmpeg, configure_logging, load_config, sanitize_slug
 
@@ -251,6 +249,8 @@ def transcribe_audio(
     language = language_map[mode]
 
     logging.info(f"Loading model: {model_name}")
+    from faster_whisper import WhisperModel
+
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
     paths = audio_path if isinstance(audio_path, list) else [audio_path]
