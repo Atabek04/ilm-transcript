@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from faster_whisper import WhisperModel
 
 import convert
-from utils import check_ffmpeg, configure_logging, sanitize_slug
+from utils import check_ffmpeg, configure_logging, load_config, sanitize_slug
 
 DEFAULT_MODEL = "large-v3-turbo"
 VALID_MODES = {"en-ar", "ar", "en"}
@@ -388,6 +388,9 @@ def main() -> None:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
+    cfg = load_config()
+    logging.debug("Config loaded from ~/.transcriber.toml")
+
     parser = argparse.ArgumentParser(
         description="Transcribe Islamic lectures from YouTube or local audio files."
     )
@@ -395,12 +398,10 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         choices=["en-ar", "ar", "en"],
-        default="en-ar",
         help="Transcription mode (default: en-ar)",
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
         help=f"Whisper model name (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
@@ -416,8 +417,24 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./output"),
         help="Output directory (default: ./output)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show title/duration/path without downloading or transcribing",
+    )
+    parser.add_argument(
+        "--sleep-interval",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Seconds to sleep between playlist entries (default: 0)",
+    )
+    parser.set_defaults(
+        mode=cfg.get("mode", "en-ar"),
+        model=cfg.get("model", DEFAULT_MODEL),
+        output_dir=Path(cfg.get("output_dir", "./output")),
     )
     args = parser.parse_args()
 
